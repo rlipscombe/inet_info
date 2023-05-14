@@ -1,6 +1,8 @@
 -module(inet_info).
 
--export([ports/0, info/0, info/1, info/2]).
+-export([ports/0, sockets/0, info/0, info/1, info/2]).
+
+-type socket() :: {'$inet', module(), any()}.
 
 ports() ->
     lists:filter(
@@ -19,54 +21,59 @@ ports() ->
         erlang:ports()
     ).
 
+sockets() ->
+    gen_tcp_socket:which_sockets() ++ gen_udp_socket:which_sockets().
+
 -spec info() -> list(map()).
 info() ->
-    [info(Port) || Port <- ports()].
+    [info(Port) || Port <- ports()] ++ [info(Socket) || Socket <- sockets()].
 
--spec info(Port :: port()) -> map().
-info(Port) when is_port(Port) ->
+-spec info(S :: port() | socket()) -> map().
+info(S) ->
     info(
-        Port,
-        [port, module, recv_oct, send_oct, owner, local_address, foreign_address, state, type]
+        S,
+        [id, module, recv_oct, send_oct, owner, local_address, foreign_address, state, type]
     ).
 
 -spec info(Port :: port(), Items :: [atom()]) -> map().
 info(Port, Items) when is_port(Port), is_list(Items) ->
-    info(Port, Items, #{}).
+    port_info(Port, Items, #{});
+info(Socket = {'$inet', Module, _}, Items) when is_list(Items) ->
+    socket_info(Module, Socket, Items, #{}).
 
--spec info(Port :: port(), Items :: [atom()], Acc :: map()) -> map().
-info(_Port, [], Acc) ->
+-spec port_info(Port :: port(), Items :: [atom()], Acc :: map()) -> map().
+port_info(_Port, [], Acc) ->
     Acc;
-info(Port, [port | Items], Acc) ->
+port_info(Port, [port | Items], Acc) ->
     case erlang:port_info(Port, id) of
         {id, Id} ->
-            info(Port, Items, Acc#{id => Id});
+            port_info(Port, Items, Acc#{id => Id});
         _ ->
-            info(Port, Items, Acc)
+            port_info(Port, Items, Acc)
     end;
-info(Port, [owner | Items], Acc) ->
+port_info(Port, [owner | Items], Acc) ->
     case erlang:port_info(Port, connected) of
         {connected, Owner} ->
-            info(Port, Items, Acc#{owner => Owner});
+            port_info(Port, Items, Acc#{owner => Owner});
         _ ->
-            info(Port, Items, Acc)
+            port_info(Port, Items, Acc)
     end;
-info(Port, [local_address | Items], Acc) ->
-    unwrap_info(local_address, prim_inet:sockname(Port), Port, Items, Acc);
-info(Port, [foreign_address | Items], Acc) ->
-    unwrap_info(foreign_address, prim_inet:peername(Port), Port, Items, Acc);
-info(Port, [state | Items], Acc) ->
-    unwrap_info(state, prim_inet:getstatus(Port), Port, Items, Acc);
-info(Port, [type | Items], Acc) ->
+port_info(Port, [local_address | Items], Acc) ->
+    unwrap_port_info(local_address, prim_inet:sockname(Port), Port, Items, Acc);
+port_info(Port, [foreign_address | Items], Acc) ->
+    unwrap_port_info(foreign_address, prim_inet:peername(Port), Port, Items, Acc);
+port_info(Port, [state | Items], Acc) ->
+    unwrap_port_info(state, prim_inet:getstatus(Port), Port, Items, Acc);
+port_info(Port, [type | Items], Acc) ->
     case prim_inet:gettype(Port) of
         {ok, {_, Type}} ->
-            info(Port, Items, Acc#{type => Type});
+            port_info(Port, Items, Acc#{type => Type});
         _ ->
-            info(Port, Items, Acc)
+            port_info(Port, Items, Acc)
     end;
-info(Port, [module | Items], Acc) ->
-    unwrap_info_or_else(module, inet_db:lookup_socket(Port), prim_inet, Port, Items, Acc);
-info(Port, [Stat | Items], Acc) when
+port_info(Port, [module | Items], Acc) ->
+    unwrap_port_info_or_else(module, inet_db:lookup_socket(Port), prim_inet, Port, Items, Acc);
+port_info(Port, [Stat | Items], Acc) when
     Stat =:= recv_cnt;
     Stat =:= recv_max;
     Stat =:= recv_avg;
@@ -79,24 +86,24 @@ info(Port, [Stat | Items], Acc) when
 ->
     case prim_inet:getstat(Port, [Stat]) of
         {ok, [{Stat, N}]} ->
-            info(Port, Items, Acc#{Stat => N});
+            port_info(Port, Items, Acc#{Stat => N});
         _ ->
-            info(Port, Items, Acc)
+            port_info(Port, Items, Acc)
     end.
 
--spec unwrap_info(
+-spec unwrap_port_info(
     Key :: atom(),
     Result :: {ok, term()} | {error, term()},
     Port :: port(),
     Items :: [atom()],
     Acc :: map()
 ) -> map().
-unwrap_info(Key, {ok, Value}, Port, Items, Acc) ->
-    info(Port, Items, Acc#{Key => Value});
-unwrap_info(_Key, _, Port, Items, Acc) ->
-    info(Port, Items, Acc).
+unwrap_port_info(Key, {ok, Value}, Port, Items, Acc) ->
+    port_info(Port, Items, Acc#{Key => Value});
+unwrap_port_info(_Key, _, Port, Items, Acc) ->
+    port_info(Port, Items, Acc).
 
--spec unwrap_info_or_else(
+-spec unwrap_port_info_or_else(
     Key :: atom(),
     Result :: {ok, term()} | {error, term()},
     Default :: term(),
@@ -104,7 +111,14 @@ unwrap_info(_Key, _, Port, Items, Acc) ->
     Items :: [atom()],
     Acc :: map()
 ) -> map().
-unwrap_info_or_else(Key, {ok, Value}, _Default, Port, Items, Acc) ->
-    info(Port, Items, Acc#{Key => Value});
-unwrap_info_or_else(Key, _, Default, Port, Items, Acc) ->
-    info(Port, Items, Acc#{Key => Default}).
+unwrap_port_info_or_else(Key, {ok, Value}, _Default, Port, Items, Acc) ->
+    port_info(Port, Items, Acc#{Key => Value});
+unwrap_port_info_or_else(Key, _, Default, Port, Items, Acc) ->
+    port_info(Port, Items, Acc#{Key => Default}).
+
+socket_info(_Socket, _Module, [], Acc) ->
+    Acc;
+socket_info(Socket, Module, [port | Items], Acc) ->
+    case Module:getopts(Socket, [fd]) of
+        {ok, [{fd, FD}]} ->
+            socket_info(Socket, Module, Items, Acc#{id => FD})
